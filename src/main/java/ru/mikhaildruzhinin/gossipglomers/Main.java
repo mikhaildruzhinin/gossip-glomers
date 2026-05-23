@@ -5,12 +5,15 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.util.Scanner;
+import java.util.concurrent.atomic.AtomicInteger;
 
-public class Echo {
+public class Main {
 
     private static String nodeId;
 
     private static int nextMsgId = 0;
+
+    private static final AtomicInteger id = new AtomicInteger(0);
     
     private static final ObjectMapper mapper = new ObjectMapper();
 
@@ -36,6 +39,15 @@ public class Echo {
                     ObjectNode responseBody = mapper.createObjectNode();
                     responseBody.put("type", "echo_ok");
                     responseBody.put("echo", body.get("echo").asString());
+                    reply(request, responseBody);
+                }
+
+                case "generate" -> {
+                    System.err.println("Generating unique id");
+                    ObjectNode responseBody = mapper.createObjectNode();
+                    responseBody.put("type", "generate_ok");
+                    String uniqueId = nodeId + "-" + id.incrementAndGet();
+                    responseBody.put("id", uniqueId);
                     reply(request, responseBody);
                 }
             }

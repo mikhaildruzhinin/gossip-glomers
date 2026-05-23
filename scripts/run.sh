@@ -9,4 +9,4 @@ mvn -q compile dependency:build-classpath \
   -Dmdep.outputFile=target/classpath.txt \
   >/dev/null
 
-exec java -cp "target/classes:$(cat target/classpath.txt)" $MAELSTROM_MAIN
+exec java -cp "target/classes:$(cat target/classpath.txt)" ru.mikhaildruzhinin.gossipglomers.Main
