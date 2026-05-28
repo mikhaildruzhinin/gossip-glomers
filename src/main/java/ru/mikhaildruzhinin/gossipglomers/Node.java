@@ -1,26 +1,39 @@
 package ru.mikhaildruzhinin.gossipglomers;
 
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectReader;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Node {
 
     private String nodeId;
 
-    private final Set<String> nodeIds = new HashSet<>();
+    private final Set<String> nodeIds = ConcurrentHashMap.newKeySet();
 
     private final AtomicInteger id = new AtomicInteger(0);
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private final Set<Integer> storedMessages = new HashSet<>();
+    private final Set<Integer> storedMessages = ConcurrentHashMap.newKeySet();
+
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+    private final Object stdoutLock = new Object();
+
+    private final Object stderrLock = new Object();
 
     public void run() {
+        boolean gossipStarted = false;
         Scanner scanner = new Scanner(System.in);
         while (scanner.hasNextLine()) {
             String line = scanner.nextLine();
@@ -33,7 +46,14 @@ public class Node {
             }
 
             Optional<ObjectNode> responseBody = switch (type.asString()) {
-                case "init" -> handleInit(requestBody);
+                case "init" -> {
+                    Optional<ObjectNode> rb = handleInit(requestBody);
+                    if (!gossipStarted) {
+                        gossipStarted = true;
+                        startGossipScheduler();
+                    }
+                    yield rb;
+                }
                 case "echo" -> handleEcho(requestBody);
                 case "generate" -> handleGenerate();
                 case "broadcast" -> handleBroadcast(requestBody);
@@ -47,28 +67,51 @@ public class Node {
     }
 
     private Optional<ObjectNode> handleGossip(JsonNode requestBody) {
-        System.err.println(nodeId + ": Receiving gossip " + requestBody);
-        System.err.flush();
+        log(nodeId + ": Receiving gossip " + requestBody);
 
-        int message = requestBody.get("message").asInt();
-        boolean isNew = storedMessages.add(message);
-        if (isNew) {
-            gossip(message);
-        }
+        ObjectReader reader = mapper.readerFor(new TypeReference<List<Integer>>() {
+        });
+        List<Integer> messages = reader.readValue(requestBody.get("messages").asArray());
+
+        storedMessages.addAll(messages);
         return Optional.empty();
     }
 
-    private void gossip(int message) {
-        nodeIds.forEach(node -> {
-            ObjectNode broadcastBody = createMessageBody("gossip");
-            broadcastBody.put("message", message);
-            send(node, broadcastBody);
+    private void startGossipScheduler() {
+        scheduler.scheduleAtFixedRate(
+            this::tryGossip,
+            0,
+            300,
+            TimeUnit.MILLISECONDS
+        );
+    }
+
+    private void tryGossip() {
+        try {
+            gossip();
+        } catch (Exception e) {
+            logError(nodeId + ": Gossip failed: " + e.getMessage(), e);
+        }
+    }
+
+    private void gossip() {
+        if (storedMessages.isEmpty()) {
+            return;
+        }
+
+        nodeIds.forEach( node -> {
+            log(nodeId + ": Sending gossip to " + node);
+
+            ObjectNode responseBody = createMessageBody("gossip");
+            ArrayNode messages = mapper.createArrayNode();
+            storedMessages.forEach(messages::add);
+            responseBody.set("messages", messages);
+            send(node, responseBody);
         });
     }
 
     private Optional<ObjectNode> handleTopology() {
-        System.err.println(nodeId + ": Receiving topology");
-        System.err.flush();
+        log(nodeId + ": Receiving topology");
 
         ObjectNode responseBody = mapper.createObjectNode();
         responseBody.put("type", "topology_ok");
@@ -76,8 +119,7 @@ public class Node {
     }
 
     private Optional<ObjectNode> handleRead() {
-        System.err.println(nodeId + ": Reading messages");
-        System.err.flush();
+        log(nodeId + ": Reading messages");
 
         ObjectNode responseBody = createMessageBody("read_ok");
         ArrayNode messages = mapper.createArrayNode();
@@ -87,22 +129,17 @@ public class Node {
     }
 
     private Optional<ObjectNode> handleBroadcast(JsonNode requestBody) {
-        System.err.println(nodeId + ": Receiving broadcast " + requestBody);
-        System.err.flush();
+        log(nodeId + ": Receiving broadcast " + requestBody);
 
         int message = requestBody.get("message").asInt();
-        boolean isNew = storedMessages.add(message);
-        if (isNew) {
-            gossip(message);
-        }
+        storedMessages.add(message);
 
         ObjectNode responseBody = createMessageBody("broadcast_ok");
         return Optional.of(responseBody);
     }
 
     private Optional<ObjectNode> handleGenerate() {
-        System.err.println(nodeId + ": Generating unique id");
-        System.err.flush();
+        log(nodeId + ": Generating unique id");
 
         ObjectNode responseBody = createMessageBody("generate_ok");
         String uniqueId = nodeId + "-" + id.incrementAndGet();
@@ -111,8 +148,7 @@ public class Node {
     }
 
     private Optional<ObjectNode> handleEcho(JsonNode requestBody) {
-        System.err.println(nodeId + ": Echoing " + requestBody);
-        System.err.flush();
+        log(nodeId + ": Echoing " + requestBody);
 
         ObjectNode responseBody = createMessageBody("echo_ok");
         responseBody.put("echo", requestBody.get("echo").asString());
@@ -121,8 +157,7 @@ public class Node {
 
     private Optional<ObjectNode> handleInit(JsonNode requestBody) {
         nodeId = requestBody.get("node_id").asString();
-        System.err.println(nodeId + ": Initialized");
-        System.err.flush();
+        log(nodeId + ": Initialized");
         requestBody.get("node_ids").forEach(node -> {
             String n = node.asString();
             if (!Objects.equals(n, nodeId)) {
@@ -150,13 +185,28 @@ public class Node {
         ObjectNode message = mapper.createObjectNode();
         message.put("src", nodeId);
         message.put("dest", dest);
-
         message.set("body", responseBody);
 
-        System.err.println(message);
-        System.err.flush();
+        log(message.toString());
 
-        System.out.println(message);
-        System.out.flush();
+        synchronized (stdoutLock) {
+            System.out.println(message);
+            System.out.flush();
+        }
+    }
+
+    private void logError(String message, Throwable throwable) {
+        synchronized (stderrLock) {
+            System.err.println(message);
+            throwable.printStackTrace(System.err);
+            System.err.flush();
+        }
+    }
+
+    private void log(String message) {
+        synchronized (stderrLock) {
+            System.err.println(message);
+            System.err.flush();
+        }
     }
 }
