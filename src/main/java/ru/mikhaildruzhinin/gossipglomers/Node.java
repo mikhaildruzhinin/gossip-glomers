@@ -39,8 +39,11 @@ public class Node {
             String line = scanner.nextLine();
             JsonNode request = mapper.readTree(line);
             JsonNode requestBody = request.get("body");
-            JsonNode type = request.get("body").get("type");
+            if (requestBody == null) {
+                throw new RuntimeException("Body is not set");
+            }
 
+            JsonNode type = requestBody.get("type");
             if (type == null) {
                 throw new RuntimeException("Type is not set");
             }
