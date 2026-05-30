@@ -18,7 +18,11 @@ public class Node {
 
     private String nodeId;
 
-    private final Set<String> nodeIds = ConcurrentHashMap.newKeySet();
+    private final List<String> nodeIds = new ArrayList<>();
+
+    private final Set<String> neighbours = ConcurrentHashMap.newKeySet();
+
+    private static final int FANOUT = 5;
 
     private final AtomicInteger id = new AtomicInteger(0);
 
@@ -76,7 +80,12 @@ public class Node {
         });
         List<Integer> messages = reader.readValue(requestBody.get("messages").asArray());
 
-        storedMessages.addAll(messages);
+        ArrayList<Integer> newMessages = new ArrayList<>(messages);
+        newMessages.removeAll(storedMessages);
+        if (!newMessages.isEmpty()) {
+            storedMessages.addAll(newMessages);
+            gossip(newMessages);
+        }
         return Optional.empty();
     }
 
@@ -101,14 +110,17 @@ public class Node {
         if (storedMessages.isEmpty()) {
             return;
         }
+        gossip(new ArrayList<>(storedMessages));
+    }
 
-        nodeIds.forEach( node -> {
+    private void gossip(List<Integer> messages) {
+        neighbours.forEach( node -> {
             log(nodeId + ": Sending gossip to " + node);
 
             ObjectNode responseBody = createMessageBody("gossip");
-            ArrayNode messages = mapper.createArrayNode();
-            storedMessages.forEach(messages::add);
-            responseBody.set("messages", messages);
+            ArrayNode messagesNode = mapper.createArrayNode();
+            messages.forEach(messagesNode::add);
+            responseBody.set("messages", messagesNode);
             send(node, responseBody);
         });
     }
@@ -135,7 +147,11 @@ public class Node {
         log(nodeId + ": Receiving broadcast " + requestBody);
 
         int message = requestBody.get("message").asInt();
-        storedMessages.add(message);
+        boolean isNew = storedMessages.add(message);
+
+        if (isNew) {
+            gossip(List.of(message));
+        }
 
         ObjectNode responseBody = createMessageBody("broadcast_ok");
         return Optional.of(responseBody);
@@ -161,15 +177,36 @@ public class Node {
     private Optional<ObjectNode> handleInit(JsonNode requestBody) {
         nodeId = requestBody.get("node_id").asString();
         log(nodeId + ": Initialized");
-        requestBody.get("node_ids").forEach(node -> {
-            String n = node.asString();
-            if (!Objects.equals(n, nodeId)) {
-                nodeIds.add(n);
-            }
-        });
+        requestBody.get("node_ids").forEach(node -> nodeIds.add(node.asString()));
+        nodeIds.sort(String::compareTo);
+        buildTreeNeighbours();
 
         ObjectNode responseBody = createMessageBody("init_ok");
         return Optional.of(responseBody);
+    }
+
+    private void buildTreeNeighbours() {
+
+        int selfIndex = nodeIds.indexOf(nodeId);
+
+        if (selfIndex == -1) {
+            throw new RuntimeException("Node id not found: " + nodeId);
+        }
+
+        // parent
+        if (selfIndex > 0) {
+            int parentIndex = (selfIndex - 1) / FANOUT;
+            neighbours.add(nodeIds.get(parentIndex));
+        }
+
+        // children
+        for (int i = 1; i <= FANOUT; i++) {
+            int childIndex = selfIndex * FANOUT + i;
+            if (childIndex < nodeIds.size()) {
+                neighbours.add(nodeIds.get(childIndex));
+            }
+        }
+        log(nodeId + ": Neighbours " + neighbours);
     }
 
     private ObjectNode createMessageBody(String type) {
