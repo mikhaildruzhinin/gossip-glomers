@@ -30,11 +30,19 @@ public class Node {
 
     private final Set<Integer> storedMessages = ConcurrentHashMap.newKeySet();
 
+    private final Set<Integer> pendingMessages = ConcurrentHashMap.newKeySet();
+
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
     private final Object stdoutLock = new Object();
 
     private final Object stderrLock = new Object();
+
+    public static final int SCHEDULER_INITIAL_DELAY = 0;
+
+    public static final int SCHEDULER_PERIOD_VALUE = 100;
+
+    public static final TimeUnit SCHEDULER_PERIOD_TIME_UNIT = TimeUnit.MILLISECONDS;
 
     public void run() {
         boolean gossipStarted = false;
@@ -84,7 +92,7 @@ public class Node {
         newMessages.removeAll(storedMessages);
         if (!newMessages.isEmpty()) {
             storedMessages.addAll(newMessages);
-            gossip(newMessages);
+            pendingMessages.addAll(newMessages);
         }
         return Optional.empty();
     }
@@ -92,9 +100,9 @@ public class Node {
     private void startGossipScheduler() {
         scheduler.scheduleAtFixedRate(
             this::tryGossip,
-            0,
-            300,
-            TimeUnit.MILLISECONDS
+            SCHEDULER_INITIAL_DELAY,
+            SCHEDULER_PERIOD_VALUE,
+            SCHEDULER_PERIOD_TIME_UNIT
         );
     }
 
@@ -107,22 +115,20 @@ public class Node {
     }
 
     private void gossip() {
-        if (storedMessages.isEmpty()) {
+        if (pendingMessages.isEmpty()) {
             return;
         }
-        gossip(new ArrayList<>(storedMessages));
-    }
-
-    private void gossip(List<Integer> messages) {
+        ArrayList<Integer> batch = new ArrayList<>(pendingMessages);
         neighbours.forEach( node -> {
             log(nodeId + ": Sending gossip to " + node);
 
             ObjectNode responseBody = createMessageBody("gossip");
             ArrayNode messagesNode = mapper.createArrayNode();
-            messages.forEach(messagesNode::add);
+            batch.forEach(messagesNode::add);
             responseBody.set("messages", messagesNode);
             send(node, responseBody);
         });
+        batch.forEach(pendingMessages::remove);
     }
 
     private Optional<ObjectNode> handleTopology() {
@@ -150,7 +156,7 @@ public class Node {
         boolean isNew = storedMessages.add(message);
 
         if (isNew) {
-            gossip(List.of(message));
+            pendingMessages.add(message);
         }
 
         ObjectNode responseBody = createMessageBody("broadcast_ok");
